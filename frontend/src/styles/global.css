@@ -1,0 +1,5 @@
+/* frontend/src/styles/global.css */
+@import "tailwindcss";
+
+html, body, #root { height: 100%; }
+body { background:#0f172a; color:#e2e8f0; font-family: system-ui, sans-serif; }
