@@ -1,5 +1,6 @@
+// FORCE RELOAD v4 (quality filter auto-rescan)
 // frontend/src/components/AlbionCraftingCalculator.tsx
-// FORCE RELOAD v3
+
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { fetchPricesBulk, invalidatePriceCache, type ServerKey } from "../utils/price_feed";
 import {
@@ -11,7 +12,6 @@ import {
 } from "../utils/item_meta_resolver";
 import Papa from "papaparse";
 
-// ---------- Types ----------
 export type Server = ServerKey;
 
 interface MaterialRequirement {
@@ -35,7 +35,7 @@ interface RowBase {
   tier: string;
   city: string;
   productPrice: number;
-  materialCost: number; // BEFORE return rate
+  materialCost: number;
   usageFee: number;
   requiresArtefact: boolean;
   arteType: ArteType;
@@ -49,7 +49,6 @@ interface RowDerived extends RowBase {
   status: "profit" | "loss";
 }
 
-// ---------- UI helpers ----------
 const nf = (n: number) => (Number.isFinite(n) ? n : 0).toLocaleString();
 
 const CITY_OPTIONS: Record<Server, string[]> = {
@@ -59,7 +58,6 @@ const CITY_OPTIONS: Record<Server, string[]> = {
   Local: ["Lymhurst", "Bridgewatch", "Martlock", "Thetford", "Fort Sterling", "Caerleon"],
 };
 
-// 결정체 대체 맵
 const CRYSTALLIZED_FOR: Record<Exclude<ArteType, "Standard" | "Mist" | "Crystal">, string> = {
   Rune: "RUNE",
   Soul: "SOUL",
@@ -67,19 +65,7 @@ const CRYSTALLIZED_FOR: Record<Exclude<ArteType, "Standard" | "Mist" | "Crystal"
   Avalonian: "AVALONIAN_ENERGY",
 };
 
-// ---------- Utils (재료 ID 규칙 통일) ----------
-// enchant 0 → T{tier}_{BASE}
-// enchant ≥1 → T{tier}_{BASE}_LEVEL{enchant}@{enchant}
-function refinedId(
-  tier: number,
-  base: "METALBAR" | "PLANKS" | "LEATHER" | "CLOTH" | "STONEBLOCK",
-  enchant: number
-) {
-  if (!enchant || enchant === 0) return `T${tier}_${base}`;
-  return `T${tier}_${base}_LEVEL${enchant}@${enchant}`;
-}
-
-// ---------- CSV → Recipe 파서 ----------
+// ───────────────────────── CSV → 레시피 파싱 ─────────────────────────
 function parseRecipeCSV(csvText: string): Recipe[] {
   const { data } = Papa.parse(csvText, { header: true, skipEmptyLines: true });
   const recipes: Recipe[] = [];
@@ -87,11 +73,8 @@ function parseRecipeCSV(csvText: string): Recipe[] {
   for (const row of data as any[]) {
     const id = row.id?.trim();
     if (!id) continue;
-    // 최종 생산물만
     if (row.is_final_item !== "True") continue;
-    // 제작 불가 or 제외 대상 제거
     if (id.includes("ARTEFACT") || id.includes("TOOL")) continue;
-    // T4~T8만
     if (!id.match(/^T[4-8]_/)) continue;
 
     const parsed = parseItemId(id);
@@ -99,25 +82,24 @@ function parseRecipeCSV(csvText: string): Recipe[] {
 
     const requiresArtefact = row.requires_artefact === "True";
     const materials: MaterialRequirement[] = [];
-
     const { tier, slot, enchant } = parsed;
+    const suff = enchant > 0 ? `@${enchant}` : "";
 
-    // 슬롯/무기종류 간단 규칙 (필요 시 실제 레시피 테이블로 교체 가능)
     if (slot === "BAG" || slot === "CAPE") {
-      materials.push({ itemId: refinedId(tier, "CLOTH", enchant), quantity: 8, kind: "resource" });
-      materials.push({ itemId: refinedId(tier, "LEATHER", enchant), quantity: 8, kind: "resource" });
+      materials.push({ itemId: `T${tier}_CLOTH${suff}`, quantity: 8, kind: "resource" });
+      materials.push({ itemId: `T${tier}_LEATHER${suff}`, quantity: 8, kind: "resource" });
     } else if (slot === "OFF") {
-      materials.push({ itemId: refinedId(tier, "PLANKS", enchant), quantity: 8, kind: "resource" });
-      materials.push({ itemId: refinedId(tier, "METALBAR", enchant), quantity: 8, kind: "resource" });
+      materials.push({ itemId: `T${tier}_PLANKS${suff}`, quantity: 8, kind: "resource" });
+      materials.push({ itemId: `T${tier}_METALBAR${suff}`, quantity: 8, kind: "resource" });
     } else if (slot === "MAIN") {
-      materials.push({ itemId: refinedId(tier, "METALBAR", enchant), quantity: 16, kind: "resource" });
-      materials.push({ itemId: refinedId(tier, "LEATHER", enchant), quantity: 8, kind: "resource" });
+      materials.push({ itemId: `T${tier}_METALBAR${suff}`, quantity: 16, kind: "resource" });
+      materials.push({ itemId: `T${tier}_LEATHER${suff}`, quantity: 8, kind: "resource" });
     } else if (slot === "2H") {
-      materials.push({ itemId: refinedId(tier, "METALBAR", enchant), quantity: 20, kind: "resource" });
-      materials.push({ itemId: refinedId(tier, "LEATHER", enchant), quantity: 12, kind: "resource" });
-    } else if (slot === "HEAD" || slot === "ARMOR" || slot === "SHOES") {
-      materials.push({ itemId: refinedId(tier, "CLOTH", enchant), quantity: 16, kind: "resource" });
-      materials.push({ itemId: refinedId(tier, "LEATHER", enchant), quantity: 8, kind: "resource" });
+      materials.push({ itemId: `T${tier}_METALBAR${suff}`, quantity: 20, kind: "resource" });
+      materials.push({ itemId: `T${tier}_LEATHER${suff}`, quantity: 12, kind: "resource" });
+    } else if (["HEAD", "ARMOR", "SHOES"].includes(slot)) {
+      materials.push({ itemId: `T${tier}_CLOTH${suff}`, quantity: 16, kind: "resource" });
+      materials.push({ itemId: `T${tier}_LEATHER${suff}`, quantity: 8, kind: "resource" });
     }
 
     if (requiresArtefact) {
@@ -135,11 +117,10 @@ function parseRecipeCSV(csvText: string): Recipe[] {
       materials,
     });
   }
-
   return recipes;
 }
 
-// ---------- ArteMap 로드 ----------
+// ───────────────────────── ArteMap 로드 ─────────────────────────
 async function loadArteMap(): Promise<Record<string, ArteType>> {
   try {
     const r = await fetch("/data/arte_type_by_core_v3.csv", { cache: "no-store" });
@@ -159,22 +140,24 @@ async function loadArteMap(): Promise<Record<string, ArteType>> {
   return {};
 }
 
-// ---------- Component ----------
 export default function AlbionCraftingCalculator() {
-  // Controls
-  const [server, setServer] = useState<Server>("Local"); // 로컬 기본값(요청 흐름에 맞춤)
+  // ---------- Controls ----------
+  const [server, setServer] = useState<Server>("East");
   const [city, setCity] = useState("Lymhurst");
   const [saleTaxPct, setSaleTaxPct] = useState(6.5);
   const [listingPct, setListingPct] = useState(1.5);
   const [returnRate, setReturnRate] = useState(24);
   const [stationFeePer100, setStationFeePer100] = useState(200);
-  const [tomePrice, setTomePrice] = useState(120_000); // 현재 로우 계산에 미사용(필요 시 BAG 등에 반영 가능)
+  const [tomePrice, setTomePrice] = useState(120_000);
   const [showProfitOnly, setShowProfitOnly] = useState(true);
   const [sortKey, setSortKey] = useState<keyof RowDerived>("netProfit");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [query, setQuery] = useState("");
 
-  // Data
+  // ✅ 품질 필터: 1~5 중 선택 (기본: 1~4만 허용, 걸작 5 제외)
+  const [allowedQualities, setAllowedQualities] = useState<number[]>([1, 2, 3, 4]);
+
+  // ---------- Data ----------
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [rows, setRows] = useState<RowBase[]>([]);
   const [pickedCityByItem, setPickedCityByItem] = useState<Record<string, string | null>>({});
@@ -183,57 +166,46 @@ export default function AlbionCraftingCalculator() {
   const [error, setError] = useState<string | null>(null);
   const [arteMap, setArteMap] = useState<Record<string, ArteType>>({});
 
-  // Infinite scroll
-  const [displayCount, setDisplayCount] = useState(100);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const DISPLAY_STEP = 100;
+  // 내부: 자동 재스캔 디바운스 타이머
+  const rescanTimerRef = useRef<number | null>(null);
 
   // ArteMap 로드
   useEffect(() => {
     loadArteMap().then(setArteMap);
   }, []);
 
-  // 서버/도시 변경 시 캐시 무효화
-  useEffect(() => {
-    invalidatePriceCache((k) => k.startsWith(`${server}|${city}|`));
-  }, [server, city]);
-
   // 레시피 로드
   const handleReloadRecipes = async () => {
     setLoading(true);
     setError(null);
     try {
-      // CSV 로딩
       const r = await fetch("/data/aodp_parsed_items.csv", { cache: "no-store" });
       if (!r.ok) throw new Error("레시피 파일을 불러올 수 없습니다");
-      const txt = await r.text();
 
+      const txt = await r.text();
       const parsed = parseRecipeCSV(txt);
-      if (parsed.length === 0) throw new Error("파싱된 레시피가 없습니다. CSV 형식을 확인하세요.");
+      if (parsed.length === 0) {
+        throw new Error("파싱된 레시피가 없습니다. CSV 형식을 확인하세요.");
+      }
 
       setRecipes(parsed);
-      // 초기 행(가격 0)
-      const initialRows: RowBase[] = parsed.map((rp) => {
-        const p = parseItemId(rp.itemId);
-        const meta = p ? classifyMeta(p.core, p.slot) : null;
-        const arteType = (arteMap[rp.core.toUpperCase()] ?? "Standard") as ArteType;
 
+      const initialRows: RowBase[] = parsed.slice(0, 200).map((rec) => {
+        const arteType = (arteMap[rec.core.toUpperCase()] ?? "Standard") as ArteType;
         return {
-          id: rp.itemId,
-          tier: `T${rp.tier}${rp.enchant > 0 ? `@${rp.enchant}` : ""}`,
+          id: rec.itemId,
+          tier: `T${rec.tier}${rec.enchant > 0 ? `@${rec.enchant}` : ""}`,
           city,
           productPrice: 0,
           materialCost: 0,
           usageFee: 0,
-          requiresArtefact: rp.requiresArtefact,
+          requiresArtefact: rec.requiresArtefact,
           arteType,
         };
       });
 
       setRows(initialRows);
       setPickedCityByItem({});
-      setDisplayCount(100); // 스크롤 초기화
-      invalidatePriceCache(); // 규칙 바뀐 직후 초기화 권장
     } catch (e: any) {
       setError(e?.message ?? String(e));
     } finally {
@@ -241,42 +213,44 @@ export default function AlbionCraftingCalculator() {
     }
   };
 
-  // 스캔 (모든 레시피 처리: price_feed.ts가 내부에서 청크/백오프 처리)
+  // 스캔 시작
   const handleScan = async () => {
     if (!recipes.length) {
       setError("먼저 레시피를 불러오세요");
       return;
     }
+
     setScanning(true);
     setError(null);
+    const ac = new AbortController();
 
     try {
-      // 1) 제품 ID와 재료 ID 수집
-      const productIds = recipes.map((r) => r.itemId);
+      // 모든 아이템 ID 수집 (데모로 100개 한정)
+      const productIds = recipes.slice(0, 100).map((r) => r.itemId);
       const materialIds = new Set<string>();
-      for (const r of recipes) {
-        for (const m of r.materials) materialIds.add(m.itemId);
-      }
+      recipes.slice(0, 100).forEach((r) => {
+        r.materials.forEach((m) => materialIds.add(m.itemId));
+      });
 
-      const crystalIds = Object.values(CRYSTALLIZED_FOR);
-      const allIds = [...productIds, ...Array.from(materialIds), ...crystalIds];
+      const allIds = [...productIds, ...Array.from(materialIds), "RUNE", "SOUL", "RELIC", "AVALONIAN_ENERGY"];
 
-      // 2) 가격 조회
-      const { prices, picked } = await fetchPricesBulk(server, city, allIds);
+      // ✅ 품질 필터 반영하여 가격 조회
+      const { prices, picked } = await fetchPricesBulk(server, city, allIds, {
+        signal: ac.signal,
+        qualities: allowedQualities,
+      });
 
-      // 3) 행 계산
-      const nextRows: RowBase[] = recipes.map((recipe) => {
+      // 행 계산
+      const nextRows: RowBase[] = recipes.slice(0, 100).map((recipe) => {
         const parsed = parseItemId(recipe.itemId);
-        if (!parsed) return null as any;
+        if (!parsed) return null;
 
         const meta = classifyMeta(parsed.core, parsed.slot);
         const arteType = (arteMap[recipe.core.toUpperCase()] ?? "Standard") as ArteType;
-
-        // 제작소 수수료 계산용 ItemValue
         const itemValue = computeItemValue(parsed.tier, parsed.enchant, meta.numItems, arteType, meta.isShapeshifter);
         const usageFee = Math.round(computeUsageFee(itemValue, stationFeePer100));
 
-        // 재료비 (아티팩트 ↔ 결정체 대체 포함)
+        // 재료비 계산(품질 필터 적용된 prices 사용)
         let materialCost = 0;
         let arteSub: { used: boolean; via: string } | undefined;
 
@@ -308,19 +282,51 @@ export default function AlbionCraftingCalculator() {
           arteType,
           arteSub,
         };
-      }).filter(Boolean) as RowBase[];
+      }).filter((r) => r !== null) as RowBase[];
 
       const usedMap: Record<string, string | null> = {};
-      for (const id of productIds) usedMap[id] = picked[id]?.cityUsed ?? null;
+      for (const id of productIds) {
+        usedMap[id] = picked[id]?.cityUsed ?? null;
+      }
 
       setRows(nextRows);
       setPickedCityByItem(usedMap);
     } catch (e: any) {
-      setError(e?.message ?? String(e));
+      if ((e as any)?.name !== "AbortError") {
+        setError(e?.message ?? String(e));
+      }
     } finally {
       setScanning(false);
     }
   };
+
+  // 서버/도시/품질 변경 시: 관련 캐시 무효화 + 자동 재스캔 (디바운스)
+  useEffect(() => {
+    // 캐시: 현재 조합 키만 부분 무효화(동일 조합이면 최신 조회를 강제)
+    const qKey = (arr: number[]) => arr.join(",");
+    invalidatePriceCache((k) => k.startsWith(`${server}|${city}|q=${qKey(allowedQualities)}`));
+
+    // 디바운스 재스캔
+    if (!recipes.length) return;
+    if (scanning || loading) return;
+
+    // 기존 타이머 제거
+    if (rescanTimerRef.current) {
+      window.clearTimeout(rescanTimerRef.current);
+    }
+    // 300ms 뒤 자동 재스캔
+    rescanTimerRef.current = window.setTimeout(() => {
+      handleScan();
+    }, 300);
+
+    return () => {
+      if (rescanTimerRef.current) {
+        window.clearTimeout(rescanTimerRef.current);
+        rescanTimerRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [server, city, allowedQualities.join(","), recipes.length]);
 
   // 파생 테이블
   const derived: RowDerived[] = useMemo(() => {
@@ -333,11 +339,11 @@ export default function AlbionCraftingCalculator() {
       const netProfit = Math.round(netRevenue - totalCost);
       const roiPct = r.productPrice ? (netProfit / r.productPrice) * 100 : 0;
       const status: RowDerived["status"] = netProfit >= 0 ? "profit" : "loss";
+
       return { ...r, materialCostAfterReturn, netProfit, roiPct, status };
     });
   }, [rows, returnRate, saleTaxPct, listingPct]);
 
-  // 필터/정렬
   const filtered = useMemo(() => {
     let out = derived.filter((r) => (showProfitOnly ? r.status === "profit" : true));
     if (query.trim()) {
@@ -353,23 +359,6 @@ export default function AlbionCraftingCalculator() {
     return out;
   }, [derived, showProfitOnly, sortDir, sortKey, query]);
 
-  // 무한 스크롤: 스크롤 컨테이너 이벤트
-  const onScroll = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const nearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 80; // 여유 80px
-    if (nearBottom) {
-      setDisplayCount((c) => Math.min(c + DISPLAY_STEP, filtered.length || c + DISPLAY_STEP));
-    }
-  };
-
-  useEffect(() => {
-    // 필터 결과 바뀌면 노출 개수 재설정(최소 100)
-    setDisplayCount((prev) => Math.max(100, Math.min(prev, filtered.length)));
-  }, [filtered.length]);
-
-  const visibleRows = filtered.slice(0, displayCount);
-
   const toggleSort = (key: keyof RowDerived) => {
     if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     else {
@@ -378,9 +367,19 @@ export default function AlbionCraftingCalculator() {
     }
   };
 
+  const toggleQuality = (q: number) => {
+    setAllowedQualities((prev) => {
+      const has = prev.includes(q);
+      const next = has ? prev.filter((x) => x !== q) : [...prev, q].sort((a, b) => a - b);
+      return next.length ? next : prev; // 최소 1개 유지
+    });
+  };
+
+  const qualityLabel = (q: number) =>
+    ({ 1: "보통(1)", 2: "좋음(2)", 3: "훌륭(3)", 4: "탁월(4)", 5: "걸작(5)" } as Record<number, string>)[q] ?? String(q);
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-900 to-slate-800 text-slate-100">
-      {/* Top bar */}
       <header className="sticky top-0 z-10 backdrop-blur bg-white/5 border-b border-white/10">
         <div className="mx-auto max-w-7xl px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -401,24 +400,51 @@ export default function AlbionCraftingCalculator() {
               label="서버"
               value={server}
               onChange={(v) => setServer(v as Server)}
-              options={["Local", "East", "West", "Europe"]}
+              options={["East", "West", "Europe", "Local"]}
             />
-            <SelectField
-              label="도시"
-              value={city}
-              onChange={(v) => setCity(v)}
-              options={CITY_OPTIONS[server]}
-            />
+            <SelectField label="도시" value={city} onChange={(v) => setCity(v)} options={CITY_OPTIONS[server]} />
+
             <NumberField label="판매세 %" value={saleTaxPct} onChange={setSaleTaxPct} step={0.1} />
             <NumberField label="리스팅 %" value={listingPct} onChange={setListingPct} step={0.1} />
             <NumberField label="반환률 %" value={returnRate} onChange={setReturnRate} step={1} />
             <NumberField label="제작소 수수료/100" value={stationFeePer100} onChange={setStationFeePer100} step={10} />
             <NumberField label="Tome 가격" value={tomePrice} onChange={setTomePrice} step={1000} />
+
+            {/* ✅ 품질 필터 */}
+            <div className="md:col-span-2">
+              <label className="text-sm block">
+                <div className="text-slate-300 mb-1">품질(여러 개 선택)</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {[1, 2, 3, 4, 5].map((q) => {
+                    const active = allowedQualities.includes(q);
+                    return (
+                      <button
+                        key={q}
+                        type="button"
+                        onClick={() => toggleQuality(q)}
+                        className={`px-2.5 py-1 rounded-lg text-xs border transition ${
+                          active
+                            ? "bg-amber-500/20 border-amber-400/60 text-amber-200"
+                            : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10"
+                        }`}
+                        title="클릭으로 토글"
+                      >
+                        {qualityLabel(q)}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  기본값은 1–4(걸작 제외). 걸작(5)을 포함하면 고가에 왜곡될 수 있어요.
+                </p>
+              </label>
+            </div>
+
             <div className="flex items-end gap-2">
               <button
                 onClick={handleReloadRecipes}
-                className="px-3 py-2 rounded-xl bg-amber-600 text-white text-sm shadow hover:bg-amber-500 disabled:opacity-60"
-                disabled={loading || scanning}
+                className="px-3 py-2 rounded-xl bg-amber-600 text-white text-sm shadow hover:bg-amber-500"
+                disabled={loading}
               >
                 {loading ? "로딩중..." : "레시피 불러오기"}
               </button>
@@ -454,19 +480,16 @@ export default function AlbionCraftingCalculator() {
               </div>
             </div>
             <div className="text-xs text-slate-300">
-              {recipes.length}개 레시피 로드됨 | {visibleRows.length}개 표시중
+              {recipes.length}개 레시피 로드됨 | {filtered.length}개 표시중
+              {scanning && <span className="ml-2 text-amber-300">· 스캔 중…</span>}
             </div>
           </div>
           {error && <p className="mt-2 text-sm text-rose-300">오류: {error}</p>}
         </section>
 
-        {/* Table (무한 스크롤 컨테이너) */}
+        {/* Table */}
         <section className="rounded-2xl overflow-hidden bg-white/5 backdrop-blur border border-white/10 shadow-xl">
-          <div
-            className="overflow-auto max-h-[70vh]"
-            ref={scrollRef}
-            onScroll={onScroll}
-          >
+          <div className="overflow-auto">
             <table className="w-full text-left text-sm">
               <thead className="bg-white/5 sticky top-0 z-0">
                 <tr className="text-slate-300">
@@ -481,7 +504,7 @@ export default function AlbionCraftingCalculator() {
                 </tr>
               </thead>
               <tbody>
-                {visibleRows.map((r) => {
+                {filtered.map((r) => {
                   const usedCity = pickedCityByItem[r.id] ?? null;
                   const usedFallback = usedCity && usedCity !== city;
                   return (
@@ -523,30 +546,15 @@ export default function AlbionCraftingCalculator() {
                 })}
               </tbody>
             </table>
-
-            {/* 하단 로드 더하기 버튼 (선택) */}
-            {visibleRows.length < filtered.length && (
-              <div className="p-3 flex justify-center">
-                <button
-                  className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-slate-100 text-sm"
-                  onClick={() => setDisplayCount((c) => Math.min(c + DISPLAY_STEP, filtered.length))}
-                >
-                  더 불러오기 ({visibleRows.length}/{filtered.length})
-                </button>
-              </div>
-            )}
           </div>
         </section>
 
-        <p className="text-xs text-slate-400 mt-3">
-          * 제작소 수수료 = ItemValue × 0.1125 × (수수료/100). 반환률 적용은 재료비에만 반영됩니다.
-        </p>
+        <p className="text-xs text-slate-400 mt-3">* 제작소 수수료 = ItemValue × 0.1125 × (수수료/100)</p>
       </main>
     </div>
   );
 }
 
-// ---------- Small UI helpers ----------
 function Th({ label, onClick }: { label: string; onClick?: () => void }) {
   return (
     <th className="px-3 py-2 font-medium select-none cursor-pointer" onClick={onClick}>
@@ -566,18 +574,16 @@ function SelectField({
   onChange: (v: string) => void;
   options: string[];
 }) {
-  // colorScheme: 'dark'로 네이티브 드롭다운 가독성 보장(흰 배경/흰 글자 문제 해결)
   return (
     <label className="text-sm">
       <div className="text-slate-300 mb-1">{label}</div>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded-xl border border-white/10 bg-slate-800/80 text-slate-100 px-3 py-2 pr-7 text-sm outline-none focus:ring-2 focus:ring-amber-500"
-        style={{ colorScheme: "dark" }}
+        className="scheme-dark w-full appearance-none rounded-xl border border-white/10 bg-white/5 px-3 py-2 pr-7 text-sm outline-none focus:ring-2 focus:ring-amber-500"
       >
         {options.map((o) => (
-          <option key={o} value={o}>
+          <option key={o} value={o} className="text-slate-900">
             {o}
           </option>
         ))}

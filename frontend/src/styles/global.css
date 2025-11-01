@@ -3,3 +3,11 @@
 
 html, body, #root { height: 100%; }
 body { background:#0f172a; color:#e2e8f0; font-family: system-ui, sans-serif; }
+
+/* 기존 내용 유지 + 아래 추가 */
+
+/* 드롭다운 목록(옵션) 가독성: 라이트 배경에 다크 텍스트 강제 */
+.scheme-dark option {
+  color: #0f172a;      /* slate-900 */
+  background: #ffffff; /* white */
+}
