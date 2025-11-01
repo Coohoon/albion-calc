@@ -9,7 +9,7 @@ export interface PriceRow {
 
 export type PriceMap = Record<string, number>;
 
-// 🔧 (new) 결과와 함께 어떤 도시 가격을 썼는지도 알고 싶다면:
+// 결과와 함께 어떤 도시 가격을 썼는지도 알고 싶다면:
 export interface PickedPrice {
   price: number;
   cityUsed: string | null; // preferCity or fallback city, 없으면 null
@@ -37,7 +37,7 @@ const CITY_ORDER = [
 ];
 
 // 모듈 전역 메모리 캐시(세션용)
-// 🔧 (fix) 도시별로 결과가 달라질 수 있으므로 키에 city 포함
+// 도시별 결과가 달라질 수 있으므로 키에 city 포함
 // key: `${server}|${city}|${item_id}` -> prefer or fallback minNonZero
 const memCache = new Map<string, PickedPrice>();
 
@@ -81,10 +81,9 @@ async function fetchWithRetry(url: string, tries = 4, signal?: AbortSignal): Pro
       }
       // 그 외는 즉시 실패
       return res;
-    } catch (e) {
+    } catch (e: any) {
       lastErr = e;
-      // Abort면 곧장 throw
-      if ((e as any)?.name === "AbortError") throw e;
+      if (e?.name === "AbortError") throw e;
       const wait = withJitter(300 * Math.pow(2, attempt));
       await sleep(wait);
       attempt++;
@@ -103,10 +102,11 @@ async function fetchMultiCity(
   cities: string[],
   signal?: AbortSignal
 ): Promise<PriceRow[]> {
+  // 🔧 FIX: 각 아이템 ID만 개별 인코딩(@ → %40 등), 콤마(,)는 그대로 유지
+  const encodedIds = ids.map(encodeURIComponent).join(",");
   const url =
     `${base}/api/v2/stats/prices/` +
-    // 🔧 (compat) 확실히 .json 붙여서 AOD/Local 동일 호환
-    `${encodeURIComponent(ids.join(","))}.json` +
+    `${encodedIds}.json` +
     `?locations=${encodeURIComponent(cities.join(","))}`;
 
   const res = await fetchWithRetry(url, 4, signal);
@@ -117,7 +117,7 @@ async function fetchMultiCity(
 /**
  * 선택 도시 가격이 0이 아니면 그 값을 사용.
  * 0이면, 같은 응답 내 "다른 도시들" 중 최저가(0 제외)를 사용.
- * 🔧 (enhance) 어떤 도시를 썼는지도 같이 반환
+ * 어떤 도시를 썼는지도 같이 반환.
  */
 function pickPreferredOrMinOther(
   rows: PriceRow[],
@@ -173,7 +173,7 @@ export async function fetchPricesBulk(
   const miss: string[] = [];
 
   for (const id of uniqIds) {
-    const key = `${server}|${city}|${id}`; // 🔧 include city
+    const key = `${server}|${city}|${id}`; // include city
     const cached = memCache.get(key);
     if (cached) {
       prices[id] = cached.price;
@@ -209,7 +209,7 @@ export async function fetchPricesBulk(
   return { prices, picked };
 }
 
-// 🔧 (optional) 캐시 무효화 유틸
+// 캐시 무효화 유틸
 export function invalidatePriceCache(predicate?: (key: string) => boolean) {
   if (!predicate) {
     memCache.clear();

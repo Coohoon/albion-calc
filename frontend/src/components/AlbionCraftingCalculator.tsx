@@ -1,58 +1,90 @@
-import React, { useMemo, useState } from "react";
-import { fetchPricesBulk, type ServerKey } from "../utils/price_feed";
+// frontend/src/components/AlbionCraftingCalculator.tsx
+import React, { useEffect, useMemo, useState } from "react";
+import { fetchPricesBulk, invalidatePriceCache, type ServerKey } from "../utils/price_feed";
+import {
+  parseItemId,
+  classifyMeta,
+  computeItemValue,
+  computeUsageFee,
+  type ArteType,
+} from "../utils/item_meta_resolver";
 
 /**
  * AlbionCraftingCalculator (real hook-in ready)
- * - Controls: server/city/taxes/listing/returnRate/station fee/Tome price
  * - "스캔 시작" 시 price_feed.fetchPricesBulk 호출하여 완제품 가격 갱신
  * - 반환률/세금/수수료 변경 시 테이블 즉시 재계산
- * - 아티팩트→결정체 대체 배지(데모 필드), 도시 대체 사용 배지(실데이터)
+ * - usageFee = ItemValue × 0.1125 × (stationFeePer100/100)
+ * - arte_type_by_core_v3 로드하여 ArteType 가중치 반영
  */
 
-// ---------- Types ----------
-// price_feed의 서버 키와 동일하게 사용
 export type Server = ServerKey; // "East" | "West" | "Europe" | "Local"
 
 interface RowBase {
   id: string;
-  tier: string; // e.g., T6@2
+  tier: string;                 // e.g., T6@2
   city: string;
-  productPrice: number; // 완제품가(스캔으로 갱신)
-  baseMaterialCost: number; // BEFORE return rate (레시피 원가 합)
-  baseUsageFee: number; // baseline usage fee, scaled by stationFeePer100
-  arteSub?: { used: boolean; via: string }; // crystal id when substituted (도메인 로직 연결 예정)
+  productPrice: number;         // 완제품가(스캔으로 갱신)
+  baseMaterialCost: number;     // BEFORE return rate (레시피 원가 합; 레시피 연동 전엔 시드값)
+  baseUsageFee: number;         // (이제는 폴백용) 과거 시각용 시드
+  arteSub?: { used: boolean; via: string }; // crystal 대체 배지
 }
 
 interface RowDerived extends RowBase {
   materialCostAfterReturn: number;
   usageFee: number;
   netProfit: number;
-  roiPct: number; // percent
+  roiPct: number;
   status: "profit" | "loss";
 }
 
-// ---------- Demo seed rows (레시피 연결 전 임시) ----------
+// --- demo seed rows (레시피 연결 전 임시) ---
 const SEED_ROWS: RowBase[] = [
-  { id: "T6_2H_FIRESTAFF_HELL@2", tier: "T6@2", city: "Lymhurst", productPrice: 1_480_000, baseMaterialCost: 1_340_000, baseUsageFee: 65_000, arteSub: { used: true, via: "CRYSTALLIZED_MAGIC" } },
-  { id: "T7_MAIN_DAGGER@3", tier: "T7@3", city: "Bridgewatch", productPrice: 3_250_000, baseMaterialCost: 3_050_000, baseUsageFee: 120_000, arteSub: { used: false, via: "" } },
-  { id: "T5_BAG@0", tier: "T5", city: "Martlock", productPrice: 240_000, baseMaterialCost: 205_000, baseUsageFee: 12_000, arteSub: { used: false, via: "" } },
-  { id: "T8_CAPE@1", tier: "T8@1", city: "Thetford", productPrice: 1_950_000, baseMaterialCost: 1_880_000, baseUsageFee: 140_000, arteSub: { used: true, via: "CRYSTALLIZED_MAGIC" } },
-  { id: "T6_OFF_TORCH@2", tier: "T6@2", city: "Fort Sterling", productPrice: 580_000, baseMaterialCost: 520_000, baseUsageFee: 22_000, arteSub: { used: false, via: "" } },
+  { id: "T6_2H_FIRESTAFF_HELL@2", tier: "T6@2", city: "Lymhurst",      productPrice: 1_480_000, baseMaterialCost: 1_340_000, baseUsageFee: 65_000,  arteSub: { used: true,  via: "CRYSTALLIZED_MAGIC" } },
+  { id: "T7_MAIN_DAGGER@3",       tier: "T7@3", city: "Bridgewatch",   productPrice: 3_250_000, baseMaterialCost: 3_050_000, baseUsageFee: 120_000, arteSub: { used: false, via: "" } },
+  { id: "T5_BAG@0",               tier: "T5",   city: "Martlock",      productPrice: 240_000,  baseMaterialCost: 205_000,  baseUsageFee: 12_000,  arteSub: { used: false, via: "" } },
+  { id: "T8_CAPE@1",              tier: "T8@1", city: "Thetford",      productPrice: 1_950_000, baseMaterialCost: 1_880_000, baseUsageFee: 140_000, arteSub: { used: true,  via: "CRYSTALLIZED_MAGIC" } },
+  { id: "T6_OFF_TORCH@2",         tier: "T6@2", city: "Fort Sterling", productPrice: 580_000,   baseMaterialCost: 520_000,  baseUsageFee: 22_000,   arteSub: { used: false, via: "" } },
 ];
 
-// util: number formatting
-const nf = (n: number) => n.toLocaleString();
+// number formatting (NaN 방지)
+const nf = (n: number) => (Number.isFinite(n) ? n : 0).toLocaleString();
 
-// City options per server (Local도 동일 세트 사용; 필요 시 빈 배열 처리 가능)
+// City options per server
 const CITY_OPTIONS: Record<Server, string[]> = {
-  East: ["Lymhurst", "Bridgewatch", "Martlock", "Thetford", "Fort Sterling", "Caerleon"],
-  West: ["Lymhurst", "Bridgewatch", "Martlock", "Thetford", "Fort Sterling", "Caerleon"],
+  East:   ["Lymhurst", "Bridgewatch", "Martlock", "Thetford", "Fort Sterling", "Caerleon"],
+  West:   ["Lymhurst", "Bridgewatch", "Martlock", "Thetford", "Fort Sterling", "Caerleon"],
   Europe: ["Lymhurst", "Bridgewatch", "Martlock", "Thetford", "Fort Sterling", "Caerleon"],
-  Local: ["Lymhurst", "Bridgewatch", "Martlock", "Thetford", "Fort Sterling", "Caerleon"],
+  Local:  ["Lymhurst", "Bridgewatch", "Martlock", "Thetford", "Fort Sterling", "Caerleon"],
 };
 
+// --- arte map loader (json 우선, csv fallback) ---
+type ArteMap = Record<string, ArteType>;
+async function loadArteMapLocal(): Promise<ArteMap> {
+  try {
+    const r = await fetch("/data/arte_type_by_core_v3.json", { cache: "no-store" });
+    if (r.ok) return (await r.json()) as ArteMap;
+  } catch {}
+  try {
+    const r = await fetch("/data/arte_type_by_core_v3.csv", { cache: "no-store" });
+    if (r.ok) {
+      const txt = await r.text();
+      const map: ArteMap = {};
+      for (const line of txt.split(/\r?\n/)) {
+        const s = line.trim();
+        if (!s || s.startsWith("#")) continue;
+        const [core, kind] = s.split(",").map(x => x?.trim());
+        if (!core || !kind) continue;
+        if (core.toUpperCase() === "CORE" && kind.toUpperCase() === "ARTETYPE") continue;
+        map[core.toUpperCase()] = kind as ArteType;
+      }
+      return map;
+    }
+  } catch {}
+  return {};
+}
+
 export default function AlbionCraftingCalculator() {
-  // ---------- Controls ----------
+  // --- Controls ---
   const [server, setServer] = useState<Server>("East");
   const [city, setCity] = useState("Lymhurst");
   const [saleTaxPct, setSaleTaxPct] = useState(6.5);
@@ -65,59 +97,97 @@ export default function AlbionCraftingCalculator() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [query, setQuery] = useState("");
 
-  // ---------- Data ----------
+  // --- Data ---
   const [rows, setRows] = useState<RowBase[]>(SEED_ROWS);
-  const [pickedCityByItem, setPickedCityByItem] = useState<Record<string, string | null>>({}); // price_feed가 실제로 어떤 도시 값을 썼는지
+  const [pickedCityByItem, setPickedCityByItem] = useState<Record<string, string | null>>({});
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // ---------- Actions ----------
+  // arte map
+  const [arteMap, setArteMap] = useState<ArteMap>({});
+  useEffect(() => { loadArteMapLocal().then(setArteMap); }, []);
+
+  // 서버/도시 변경 시 해당 키 캐시 무효화
+  useEffect(() => {
+    invalidatePriceCache((k) => k.startsWith(`${server}|${city}|`));
+  }, [server, city]);
+
+  // --- Actions ---
   const handleReloadRecipes = async () => {
-    // 실제 구현 시: csv_to_recipes.ts 로드 → setRows(...) 로 교체
+    // TODO: 레시피 연동 시 CSV 로드 → setRows(...)
     setRows(SEED_ROWS);
     setPickedCityByItem({});
+    setError(null);
   };
 
   const handleScan = async () => {
+    if (!rows.length) return;
     setScanning(true);
     setError(null);
+    const ac = new AbortController();
     try {
       const itemIds = rows.map((r) => r.id);
-      const { prices, picked } = await fetchPricesBulk(server, city, itemIds);
+      const { prices, picked } = await fetchPricesBulk(server, city, itemIds, { signal: ac.signal });
 
-      // 완제품가를 최신 가격으로 갱신 + 어떤 도시를 썼는지 기록
       const next = rows.map((r) => ({
         ...r,
-        productPrice: prices[r.id] ?? r.productPrice,
+        productPrice: prices[r.id] ?? 0,
+        city, // 표시용
       }));
+
       const usedMap: Record<string, string | null> = {};
       for (const id of itemIds) usedMap[id] = picked[id]?.cityUsed ?? null;
 
       setRows(next);
       setPickedCityByItem(usedMap);
     } catch (e: any) {
-      setError(e?.message ?? String(e));
+      if ((e as any)?.name !== "AbortError") setError(e?.message ?? String(e));
     } finally {
       setScanning(false);
     }
   };
 
-  // ---------- Derive rows based on controls ----------
+  // --- Derived table ---
   const derived: RowDerived[] = useMemo(() => {
     return rows.map((r) => {
-      const materialCostAfterReturn = Math.max(0, Math.round(r.baseMaterialCost * (1 - returnRate / 100)));
-      const usageFee = Math.round(r.baseUsageFee * (stationFeePer100 / 200));
-      const sales = (saleTaxPct / 100) * r.productPrice; // 판매세
-      const listing = (listingPct / 100) * r.productPrice; // 리스팅
-      const tome = r.id.includes("BAG") ? tomePrice : 0;
+      const materialCostAfterReturn = Math.max(
+        0,
+        Math.round(r.baseMaterialCost * (returnRate >= 0 ? (1 - returnRate / 100) : 1))
+      );
+
+      // 공식 사용: ItemValue × 0.1125 × (stationFeePer100/100)
+      let usageFee = 0;
+      const p = parseItemId(r.id);
+      if (p) {
+        const meta = classifyMeta(p.core, p.slot);
+        const arteType = (arteMap[p.core.toUpperCase()] ?? "Standard") as ArteType;
+        const itemValue = computeItemValue(
+          p.tier,
+          p.enchant,
+          meta.numItems,
+          arteType,
+          meta.isShapeshifter
+        );
+        usageFee = Math.round(computeUsageFee(itemValue, stationFeePer100));
+      } else {
+        // 파싱 실패 시 폴백(과거 시드 스케일)
+        usageFee = Math.round(r.baseUsageFee * (stationFeePer100 / 200));
+      }
+
+      const sales = (saleTaxPct / 100) * r.productPrice;
+      const listing = (listingPct / 100) * r.productPrice;
+      const requiresTome = /BAG/.test(r.id) && /INSIGHT/.test(r.id);
+      const tome = requiresTome ? tomePrice : 0;
+
       const totalCost = materialCostAfterReturn + usageFee + tome;
       const netRevenue = r.productPrice - sales - listing;
       const netProfit = Math.round(netRevenue - totalCost);
-      const roiPct = (netProfit / r.productPrice) * 100;
+      const roiPct = r.productPrice ? (netProfit / r.productPrice) * 100 : 0;
       const status: RowDerived["status"] = netProfit >= 0 ? "profit" : "loss";
+
       return { ...r, materialCostAfterReturn, usageFee, netProfit, roiPct, status };
     });
-  }, [rows, returnRate, stationFeePer100, saleTaxPct, listingPct, tomePrice]);
+  }, [rows, returnRate, stationFeePer100, saleTaxPct, listingPct, tomePrice, arteMap]);
 
   const filtered = useMemo(() => {
     let out = derived.filter((r) => (showProfitOnly ? r.status === "profit" : true));
@@ -136,10 +206,7 @@ export default function AlbionCraftingCalculator() {
 
   const toggleSort = (key: keyof RowDerived) => {
     if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    else {
-      setSortKey(key);
-      setSortDir("desc");
-    }
+    else { setSortKey(key); setSortDir("desc"); }
   };
 
   return (
@@ -158,21 +225,21 @@ export default function AlbionCraftingCalculator() {
       </header>
 
       <main className="mx-auto max-w-7xl p-4">
-        {/* Controls Card */}
+        {/* Controls */}
         <section className="rounded-2xl bg-white/5 backdrop-blur border border-white/10 shadow-lg p-4 md:p-5 mb-4">
           <div className="grid gap-3 md:grid-cols-4 lg:grid-cols-6">
             <SelectField label="서버" value={server} onChange={(v) => setServer(v as Server)} options={["East", "West", "Europe", "Local"]} />
-            <SelectField label="도시" value={city} onChange={(v) => setCity(v)} options={CITY_OPTIONS[server]} />
-            <NumberField label={<LabelWithInfo text="판매세 %" info="판매 완료 시 차감되는 수수료. 판매가 × 판매세%" />} value={saleTaxPct} onChange={setSaleTaxPct} step={0.1} />
-            <NumberField label={<LabelWithInfo text="리스팅 %" info="주문 등록 시 선지불하는 수수료. 등록가 × 리스팅% (거래 성사 여부 무관)" />} value={listingPct} onChange={setListingPct} step={0.1} />
-            <NumberField label={<LabelWithInfo text="반환률 %" info="제작 시 반환되는 자원 비율" />} value={returnRate} onChange={setReturnRate} step={1} />
-            <NumberField label={<LabelWithInfo text="제작소 수수료/100" info="ItemValue × 0.1125 × (수수료/100)" />} value={stationFeePer100} onChange={setStationFeePer100} step={10} />
-            <NumberField label={<LabelWithInfo text="Tome 가격" info="통찰 가방 제작 시 필요한 Tome 1권의 가격" />} value={tomePrice} onChange={setTomePrice} step={1000} />
+            <SelectField label="도시"  value={city}   onChange={(v) => setCity(v)} options={CITY_OPTIONS[server]} />
+            <NumberField label={<LabelWithInfo text="판매세 %"       info="판매 완료 시 차감되는 수수료. 판매가 × 판매세%" />}             value={saleTaxPct}        onChange={setSaleTaxPct}        step={0.1} />
+            <NumberField label={<LabelWithInfo text="리스팅 %"       info="주문 등록 시 선지불 수수료. 등록가 × 리스팅% (거래 성사 무관)" />} value={listingPct}        onChange={setListingPct}        step={0.1} />
+            <NumberField label={<LabelWithInfo text="반환률 %"       info="제작 시 반환되는 자원 비율" />}                               value={returnRate}        onChange={setReturnRate}        step={1} />
+            <NumberField label={<LabelWithInfo text="제작소 수수료/100" info="ItemValue × 0.1125 × (수수료/100)" />}                      value={stationFeePer100} onChange={setStationFeePer100} step={10} />
+            <NumberField label={<LabelWithInfo text="Tome 가격"      info="통찰 가방 제작 시 필요한 Tome 1권의 가격" />}                   value={tomePrice}         onChange={setTomePrice}         step={1000} />
             <div className="flex items-end gap-2">
               <button onClick={handleReloadRecipes} className="px-3 py-2 rounded-xl bg-amber-600 text-white text-sm shadow hover:bg-amber-500" disabled={scanning}>
                 레시피 다시 불러오기
               </button>
-              <button onClick={handleScan} className="px-3 py-2 rounded-xl bg-cyan-600 text-white text-sm shadow hover:bg-cyan-500 disabled:opacity-60" disabled={scanning}>
+              <button onClick={handleScan} className="px-3 py-2 rounded-xl bg-cyan-600 text-white text-sm shadow hover:bg-cyan-500 disabled:opacity-60" disabled={scanning || !rows.length}>
                 {scanning ? "스캔 중..." : "스캔 시작"}
               </button>
             </div>
@@ -265,9 +332,8 @@ export default function AlbionCraftingCalculator() {
           </div>
         </section>
 
-        {/* Footnote */}
         <p className="text-xs text-slate-400 mt-3">
-          * 스캔은 <code className="font-mono">price_feed.fetchPricesBulk</code> 를 통해 실제 API로 수행됩니다. 레시피 연동 전까지는 seed rows로 동작합니다.
+          * 제작소 수수료는 <code className="font-mono">ItemValue × 0.1125 × (수수료/100)</code> 공식으로 계산됩니다.
         </p>
       </main>
     </div>
@@ -285,25 +351,17 @@ function Th({ label, onClick }: { label: string; onClick?: () => void }) {
 
 function labelOfKey(k: keyof RowDerived) {
   switch (k) {
-    case "id":
-      return "아이템";
-    case "tier":
-      return "티어";
-    case "city":
-      return "도시";
-    case "productPrice":
-      return "완제품가";
-    case "materialCostAfterReturn":
-      return "재료비(반환후)";
-    case "usageFee":
-      return "제작소 수수료";
-    case "netProfit":
-      return "순이익";
-    case "roiPct":
-      return "수익률";
-    case "status":
-      return "상태";
+    case "id": return "아이템";
+    case "tier": return "티어";
+    case "city": return "도시";
+    case "productPrice": return "완제품가";
+    case "materialCostAfterReturn": return "재료비(반환후)";
+    case "usageFee": return "제작소 수수료";
+    case "netProfit": return "순이익";
+    case "roiPct": return "수익률";
+    case "status": return "상태";
   }
+  return "";
 }
 
 function Tooltip({ text, children }: { text: string; children: React.ReactNode }) {
@@ -362,19 +420,6 @@ function SelectField({ label, value, onChange, options }: { label: React.ReactNo
           </option>
         ))}
       </select>
-    </FieldShell>
-  );
-}
-
-function InputField({ label, value, onChange, placeholder }: { label: React.ReactNode; value: string; onChange: (v: string) => void; placeholder?: string }) {
-  return (
-    <FieldShell label={label}>
-      <input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-amber-500"
-      />
     </FieldShell>
   );
 }
