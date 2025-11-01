@@ -36,6 +36,17 @@ const CITY_ORDER = [
   "Brecilien",
 ];
 
+// 도시명 → LocationId (네 ingest 로그 기준으로 맞춤)
+const CITY_TO_LOCID: Record<string, string> = {
+  Lymhurst: "1002",
+  Bridgewatch: "1006",
+  Martlock: "1004",
+  Thetford: "1005",
+  "Fort Sterling": "1003",
+  Caerleon: "2002",
+  Brecilien: "3008",
+};
+
 // 모듈 전역 메모리 캐시(세션용)
 // 도시별 결과가 달라질 수 있으므로 키에 city 포함
 // key: `${server}|${city}|${item_id}` -> prefer or fallback minNonZero
@@ -95,23 +106,78 @@ async function fetchWithRetry(url: string, tries = 4, signal?: AbortSignal): Pro
   return fetch(url, { cache: "no-store", signal });
 }
 
-// 한 번의 호출에 여러 도시를 넣어서 응답 받기
+// ---- 응답 정규화 (로컬/원격 서로 다른 포맷을 공통 PriceRow로 변환) ----
+/** 로컬 서버 Type A: [{ item_id, price, cityUsed }] */
+function normalizeLocalTypeA(arr: Array<{ item_id: string; price: number; cityUsed?: string | null }>): PriceRow[] {
+  return arr.map((x) => ({
+    item_id: decodeURIComponent(x.item_id ?? ""), // 혹시 서버가 인코딩된 키를 줄 경우 대비
+    city: x.cityUsed ?? "",
+    sell_price_min: Number(x.price ?? 0) || 0,
+  }));
+}
+
+/** 원격/Albion-Data: [{ item_id, city, sell_price_min, ... }] */
+function normalizeAlbion(rows: any[]): PriceRow[] {
+  return rows.map((r) => ({
+    item_id: String(r.item_id ?? ""),
+    city: String(r.city ?? ""),
+    sell_price_min: Number(r.sell_price_min ?? 0) || 0,
+  }));
+}
+
+// ---- 멀티시티 조회 (서버/엔드포인트 별로 분기) ----
 async function fetchMultiCity(
-  base: string,
+  server: ServerKey,
   ids: string[],
   cities: string[],
   signal?: AbortSignal
 ): Promise<PriceRow[]> {
-  // 🔧 FIX: 각 아이템 ID만 개별 인코딩(@ → %40 등), 콤마(,)는 그대로 유지
-  const encodedIds = ids.map(encodeURIComponent).join(",");
-  const url =
-    `${base}/api/v2/stats/prices/` +
-    `${encodedIds}.json` +
-    `?locations=${encodeURIComponent(cities.join(","))}`;
+  const base = SERVER_BASE[server];
 
-  const res = await fetchWithRetry(url, 4, signal);
-  if (!res.ok) return [];
-  return (await res.json()) as PriceRow[];
+  // 각 아이템 ID만 개별 인코딩(@ → %40 등), 콤마(,)는 그대로 유지
+  const encodedIds = ids.map(encodeURIComponent).join(",");
+  const locationsParam = encodeURIComponent(cities.join(","));
+
+  // ── Local 서버: 먼저 Type-A 쿼리 시도 (items + location_id)
+  if (server === "Local") {
+    const preferCity = cities[0]; // 첫 번째가 사용자가 고른 도시
+    const loc = CITY_TO_LOCID[preferCity] ?? "";
+
+    // Type-A: GET /api/v2/stats/prices?items=...&location_id=1002
+    const urlA = `${base}/api/v2/stats/prices?items=${encodedIds}&location_id=${encodeURIComponent(loc)}`;
+    try {
+      const rA = await fetchWithRetry(urlA, 3, signal);
+      if (rA.ok) {
+        const dataA = (await rA.json()) as Array<{ item_id: string; price: number; cityUsed?: string | null }>;
+        // 로컬 서버가 이 포맷을 반환한다면 여기서 바로 정규화
+        return normalizeLocalTypeA(dataA);
+      }
+      // 404 등: 다음 시도로 넘어감
+    } catch (_) {
+      // 다음 시도로
+    }
+
+    // Local-대안: Albion-Data 스타일
+    // GET /api/v2/stats/prices/{ids}.json?locations=Lymhurst,Bridgewatch,...
+    const urlB = `${base}/api/v2/stats/prices/${encodedIds}.json?locations=${locationsParam}`;
+    try {
+      const rB = await fetchWithRetry(urlB, 3, signal);
+      if (rB.ok) {
+        const dataB = await rB.json();
+        return normalizeAlbion(Array.isArray(dataB) ? dataB : []);
+      }
+    } catch (_) {
+      // 아래 원격 시도로 최종 이관
+    }
+  }
+
+  // ── 원격(공식) 서버
+  // https://{region}.albion-online-data.com/api/v2/stats/prices/T4_OFF_SHIELD%2CT4_OFF_SHIELD%401.json?locations=Lymhurst&qualities=1
+  const remoteUrl = `${base}/api/v2/stats/prices/${encodedIds}.json?locations=${locationsParam}&qualities=1`;
+  const r = await fetchWithRetry(remoteUrl, 4, signal);
+  if (!r.ok) return [];
+  const rows = await r.json();
+  return normalizeAlbion(Array.isArray(rows) ? rows : []);
 }
 
 /**
@@ -164,7 +230,6 @@ export async function fetchPricesBulk(
   itemIds: string[],
   opts?: { signal?: AbortSignal }
 ): Promise<{ prices: PriceMap; picked: PickedPriceMap }> {
-  const base = SERVER_BASE[server];
   const uniqIds = unique(itemIds);
 
   // 메모리 캐시에 있는 값 선반영
@@ -191,7 +256,7 @@ export async function fetchPricesBulk(
   const chunks = chunk(miss, CHUNK_SIZE);
   for (let i = 0; i < chunks.length; i++) {
     const ids = chunks[i];
-    const rows = await fetchMultiCity(base, ids, cities, opts?.signal);
+    const rows = await fetchMultiCity(server, ids, cities, opts?.signal);
     const pickedChunk = pickPreferredOrMinOther(rows, city);
 
     // 결과 반영 + 캐시 저장
